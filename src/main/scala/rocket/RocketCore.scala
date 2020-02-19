@@ -1,6 +1,9 @@
 // See LICENSE.Berkeley for license details.
 // See LICENSE.SiFive for license details.
 
+// https://content.riscv.org/wp-content/uploads/2017/05/riscv-spec-v2.2.pdf
+// http://www-inst.eecs.berkeley.edu/~cs250/sp16/disc/Disc02.pdf
+
 package freechips.rocketchip.rocket
 
 import Chisel._
@@ -227,7 +230,7 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
   ibuf.io.kill := take_pc
 
   require(decodeWidth == 1 /* TODO */ && retireWidth == decodeWidth)
-  val id_ctrl = Wire(new IntCtrlSigs()).decode(id_inst(0), decode_table)
+  val id_ctrl = Wire(new IntCtrlSigs()).decode(id_inst(0), decode_table, p(InstrumentationMapping))
   val id_raddr3 = id_expanded_inst(0).rs3
   val id_raddr2 = id_expanded_inst(0).rs2
   val id_raddr1 = id_expanded_inst(0).rs1
@@ -483,8 +486,8 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
     mem_reg_wdata := scie_unpipelined.map(u => Mux(ex_ctrl.scie, u, alu.io.out)).getOrElse(alu.io.out)
     mem_br_taken := alu.io.cmp_out
 
-    when (ex_ctrl.rxs2 && (ex_ctrl.mem || ex_ctrl.rocc || ex_sfence)) {
-      val typ = Mux(ex_ctrl.rocc, log2Ceil(xLen/8).U, ex_ctrl.mem_type)
+    when (ex_ctrl.rxs2 && (ex_ctrl.mem || ex_ctrl.rocc_explicit || ex_sfence)) {
+      val typ = Mux(ex_ctrl.rocc_explicit, log2Ceil(xLen/8).U, ex_ctrl.mem_type)
       mem_reg_rs2 := new StoreGen(typ, 0.U, ex_rs(1), coreDataBytes).data
     }
     when (ex_ctrl.jalr && csr.io.status.debug) {
@@ -528,7 +531,7 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
     wb_ctrl := mem_ctrl
     wb_reg_sfence := mem_reg_sfence
     wb_reg_wdata := Mux(!mem_reg_xcpt && mem_ctrl.fp && mem_ctrl.wxd, io.fpu.toint_data, mem_int_wdata)
-    when (mem_ctrl.rocc || mem_reg_sfence) {
+    when (mem_ctrl.rocc_explicit || mem_reg_sfence) {
       wb_reg_rs2 := mem_reg_rs2
     }
     wb_reg_cause := mem_cause
@@ -559,7 +562,7 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
 
   val wb_pc_valid = wb_reg_valid || wb_reg_replay || wb_reg_xcpt
   val wb_wxd = wb_reg_valid && wb_ctrl.wxd
-  val wb_set_sboard = wb_ctrl.div || wb_dcache_miss || wb_ctrl.rocc
+  val wb_set_sboard = wb_ctrl.div || wb_dcache_miss || wb_ctrl.rocc_explicit
   val replay_wb_common = io.dmem.s2_nack || wb_reg_replay
   val replay_wb_rocc = wb_reg_valid && wb_ctrl.rocc && !io.rocc.cmd.ready
   val replay_wb = replay_wb_common || replay_wb_rocc
@@ -580,9 +583,11 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
     io.rocc.resp.ready := !wb_wxd
     when (io.rocc.resp.fire()) {
       div.io.resp.ready := Bool(false)
-      ll_wdata := io.rocc.resp.bits.data
-      ll_waddr := io.rocc.resp.bits.rd
-      ll_wen := Bool(true)
+      when (wb_ctrl.rocc_explicit) {
+        ll_wdata := io.rocc.resp.bits.data
+        ll_waddr := io.rocc.resp.bits.rd
+        ll_wen := Bool(true)
+      }
     }
   }
   when (dmem_resp_replay && dmem_resp_xpu) {
@@ -769,6 +774,12 @@ class Rocket(implicit p: Parameters) extends CoreModule()(p)
   io.rocc.exception := wb_xcpt && csr.io.status.xs.orR
   io.rocc.cmd.bits.status := csr.io.status
   io.rocc.cmd.bits.inst := new RoCCInstruction().fromBits(wb_reg_inst)
+  when (wb_ctrl.handler_rocc) {
+    io.rocc.cmd.bits.inst.opcode := 0x0b.U // custom0
+    io.rocc.cmd.bits.inst.funct := wb_ctrl.handler_rocc_funct
+    io.rocc.cmd.bits.inst.xd := false.B
+    io.rocc.cmd.bits.inst.rd := 0.U
+  }
   io.rocc.cmd.bits.rs1 := wb_reg_wdata
   io.rocc.cmd.bits.rs2 := wb_reg_rs2
 

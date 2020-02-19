@@ -1,16 +1,22 @@
 // See LICENSE.SiFive for license details.
 // See LICENSE.Berkeley for license details.
 
+// https://content.riscv.org/wp-content/uploads/2017/05/riscv-spec-v2.2.pdf
+// http://www-inst.eecs.berkeley.edu/~cs250/sp16/disc/Disc02.pdf
+
 package freechips.rocketchip.rocket
 
 import Chisel._
 import Chisel.ImplicitConversions._
-import freechips.rocketchip.config.Parameters
+import freechips.rocketchip.config.{Field, Parameters}
 import freechips.rocketchip.tile.HasCoreParameters
 import freechips.rocketchip.util._
 import freechips.rocketchip.scie.SCIE
 import Instructions._
 import ALU._
+
+final case class OpcodeHandler(patern: BitPat, funct: Int)
+case object InstrumentationMapping extends Field[Seq[OpcodeHandler]](Nil)
 
 abstract trait DecodeConstants extends HasCoreParameters
 {
@@ -21,6 +27,7 @@ class IntCtrlSigs extends Bundle {
   val legal = Bool()
   val fp = Bool()
   val rocc = Bool()
+  val rocc_explicit = Bool()
   val branch = Bool()
   val jal = Bool()
   val jalr = Bool()
@@ -48,6 +55,9 @@ class IntCtrlSigs extends Bundle {
   val amo = Bool()
   val dp = Bool()
 
+  val handler_rocc = Bool()
+  val handler_rocc_funct = UInt(7.W)
+
   def default: List[BitPat] =
                 //           jal                                                                   renf1             fence.i
                 //   val     | jalr                                                                | renf2           |
@@ -59,12 +69,25 @@ class IntCtrlSigs extends Bundle {
                 //   | | | | | | | | scie      |       |      |      |         | |           |     | | | | | | |     | | | dp
                 List(N,X,X,X,X,X,X,X,X,A2_X,   A1_X,   IMM_X, DW_X,  FN_X,     N,M_X,        MT_X, X,X,X,X,X,X,X,CSR.X,X,X,X,X)
 
-  def decode(inst: UInt, table: Iterable[(BitPat, List[BitPat])]) = {
+  def decode(inst: UInt, table: Iterable[(BitPat, List[BitPat])], handlers: Seq[OpcodeHandler]) = {
     val decoder = DecodeLogic(inst, default, table)
-    val sigs = Seq(legal, fp, rocc, branch, jal, jalr, rxs2, rxs1, scie, sel_alu2,
+    val sigs = Seq(legal, fp, rocc_explicit, branch, jal, jalr, rxs2, rxs1, scie, sel_alu2,
                    sel_alu1, sel_imm, alu_dw, alu_fn, mem, mem_cmd, mem_type,
                    rfs1, rfs2, rfs3, wfd, mul, div, wxd, csr, fence_i, fence, amo, dp)
     sigs zip decoder map {case(s,d) => s := d}
+
+    if (handlers.isEmpty) {
+      handler_rocc := false.B
+    } else {
+      val handlerTable: Seq[(BitPat, List[BitPat])] = handlers.map {
+        case OpcodeHandler(pattern, funct) => pattern -> List(Y, BitPat(funct.U))
+      }
+      val handlerDecoder = DecodeLogic(inst, List(N, BitPat(0.U)), handlerTable)
+      Seq(handler_rocc, handler_rocc_funct) zip handlerDecoder map { case (s, d) => s := d }
+    }
+
+    rocc := rocc_explicit || handler_rocc
+
     this
   }
 }
